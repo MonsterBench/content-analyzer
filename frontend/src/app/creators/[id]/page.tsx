@@ -53,10 +53,12 @@ function ScrapeProgressPanel({
   active,
   progress,
   elapsedSeconds,
+  itemsFound,
 }: {
   active: boolean;
   progress: ScrapeProgress | null;
   elapsedSeconds: number;
+  itemsFound?: number;
 }) {
   if (!active) return null;
 
@@ -79,6 +81,17 @@ function ScrapeProgressPanel({
     const sec = s % 60;
     return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
   };
+
+  // Estimate remaining time based on progress
+  const getEstimate = () => {
+    if (isDone || pct <= 0 || elapsedSeconds < 10) return null;
+    const totalEstimate = Math.round(elapsedSeconds / pct);
+    const remaining = totalEstimate - elapsedSeconds;
+    if (remaining <= 0) return null;
+    return formatTime(remaining);
+  };
+
+  const estimate = getEstimate();
 
   return (
     <div
@@ -117,9 +130,16 @@ function ScrapeProgressPanel({
             {isDone ? (isFailed ? "Scrape Failed" : "Scrape Complete") : "Scraping in Progress"}
           </h3>
         </div>
-        <span className="text-xs text-[var(--muted-foreground)]">
-          {formatTime(elapsedSeconds)}
-        </span>
+        <div className="flex items-center gap-3">
+          {estimate && (
+            <span className="text-xs text-[var(--muted-foreground)]">
+              ~{estimate} remaining
+            </span>
+          )}
+          <span className="text-xs text-[var(--muted-foreground)]">
+            {formatTime(elapsedSeconds)}
+          </span>
+        </div>
       </div>
 
       {/* Progress bar */}
@@ -149,6 +169,22 @@ function ScrapeProgressPanel({
           {progress?.message || "Preparing..."}
         </p>
       </div>
+
+      {/* Items found during scrape */}
+      {!isDone && itemsFound !== undefined && itemsFound > 0 && (
+        <p className="text-xs text-[var(--muted-foreground)]">
+          {itemsFound} new items found so far
+        </p>
+      )}
+
+      {/* Come back later message */}
+      {!isDone && elapsedSeconds > 15 && (
+        <div className="bg-[var(--muted)] rounded-md p-3 mt-2">
+          <p className="text-xs text-[var(--muted-foreground)]">
+            Large channels can take 10-30 minutes to fully scrape. Feel free to close this page and come back later — the scrape continues in the background.
+          </p>
+        </div>
+      )}
 
       {/* Done stats */}
       {isDone && progress.new_items_found !== undefined && (
@@ -462,26 +498,36 @@ export default function CreatorDetailPage({
         const updatedJobs = await getScrapeJobs(creatorId);
         setJobs(updatedJobs);
         const current = updatedJobs.find((j) => j.id === job.id);
-        if (current && (current.status === "completed" || current.status === "failed")) {
-          clearInterval(poll);
-          // If WebSocket didn't already handle it
-          if (scraping) {
-            setScraping(false);
-            if (timerRef.current) {
-              clearInterval(timerRef.current);
-              timerRef.current = null;
-            }
-            setScrapeProgress({
-              stage: "done",
-              status: current.status,
-              message:
-                current.status === "completed"
-                  ? `Done! ${current.new_items_found} new items found.`
-                  : `Failed: ${current.error_message || "Unknown error"}`,
+        if (current) {
+          if (current.status === "running" && current.new_items_found > 0) {
+            setScrapeProgress((prev) => ({
+              stage: prev?.stage || "processing",
+              message: `Scraping in progress... ${current.new_items_found} new items found so far`,
+              progress: prev?.progress,
               new_items_found: current.new_items_found,
-              progress: 1,
-            });
-            load();
+            }));
+          }
+          if (current.status === "completed" || current.status === "failed") {
+            clearInterval(poll);
+            // If WebSocket didn't already handle it
+            if (scraping) {
+              setScraping(false);
+              if (timerRef.current) {
+                clearInterval(timerRef.current);
+                timerRef.current = null;
+              }
+              setScrapeProgress({
+                stage: "done",
+                status: current.status,
+                message:
+                  current.status === "completed"
+                    ? `Done! ${current.new_items_found} new items found.`
+                    : `Failed: ${current.error_message || "Unknown error"}`,
+                new_items_found: current.new_items_found,
+                progress: 1,
+              });
+              load();
+            }
           }
         }
       }, 3000);
@@ -577,6 +623,7 @@ export default function CreatorDetailPage({
         active={scraping || scrapeProgress?.stage === "done"}
         progress={scrapeProgress}
         elapsedSeconds={elapsedSeconds}
+        itemsFound={scrapeProgress?.new_items_found}
       />
 
       {/* Platforms */}
