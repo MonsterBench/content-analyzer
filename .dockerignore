@@ -1,0 +1,13 @@
+*.db
+*.db-shm
+*.db-wal
+chroma_data/
+.env
+.git
+__pycache__
+*.pyc
+frontend/
+frontend/.next/
+frontend/node_modules/
+node_modules/
+.DS_Store
