@@ -18,3 +18,4 @@ apscheduler>=3.10.0
 
 # Utilities
 requests>=2.31.0
+python-multipart>=0.0.6
