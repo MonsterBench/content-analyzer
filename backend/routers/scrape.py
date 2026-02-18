@@ -158,6 +158,11 @@ async def _run_scrape(job_id: int, creator_id: int, transcribe: bool, max_items:
         try:
             async def progress_cb(data):
                 data["job_id"] = job_id
+                # Update job's new_items_found in real-time
+                if "new_items_found" in data:
+                    job.new_items_found = data["new_items_found"]
+                    db.add(job)
+                    db.commit()
                 await _broadcast_progress(job_id, data)
 
             for platform in creator.platforms:
@@ -179,6 +184,9 @@ async def _run_scrape(job_id: int, creator_id: int, transcribe: bool, max_items:
                     continue
 
                 total_new += len(new_items)
+                job.new_items_found = total_new
+                db.add(job)
+                db.commit()
 
                 # Transcribe if requested and items need it
                 if transcribe and new_items:

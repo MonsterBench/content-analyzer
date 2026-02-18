@@ -37,12 +37,16 @@ class YouTubeScraper:
         max_videos: int = 0,  # 0 = all
         progress_callback=None,
     ) -> list[ContentItem]:
-        """Scrape YouTube channel videos with metadata and transcripts."""
+        """Scrape YouTube channel videos with metadata and transcripts.
+
+        Videos are saved to the DB incrementally as they're processed,
+        so results appear in real-time rather than waiting for the full scrape.
+        """
         channel_url = self._extract_channel_url(platform.handle)
         logger.info(f"Scraping YouTube channel: {channel_url}")
 
         if progress_callback:
-            await progress_callback({"stage": "scraping", "message": f"Fetching videos from {channel_url}..."})
+            await progress_callback({"stage": "scraping", "message": f"Fetching video list from {channel_url}..."})
 
         # Get existing external IDs
         existing_ids = set()
@@ -50,22 +54,31 @@ class YouTubeScraper:
         for row in db.exec(stmt):
             existing_ids.add(row)
 
-        # Extract video list with yt-dlp
-        videos = await self._extract_channel_videos(channel_url, max_videos)
+        # Extract flat video list (fast — single yt-dlp call)
+        flat_videos = await self._extract_flat_video_list(channel_url, max_videos)
+
+        # Filter out already-scraped videos
+        new_video_entries = [v for v in flat_videos if v.get("id", "") not in existing_ids]
+        total = len(new_video_entries)
+        skipped = len(flat_videos) - total
 
         if progress_callback:
             await progress_callback({
                 "stage": "processing",
-                "message": f"Processing {len(videos)} videos...",
+                "message": f"Found {len(flat_videos)} videos ({skipped} already scraped, {total} new to process)",
             })
 
+        if total == 0:
+            logger.info(f"No new videos to scrape from {channel_url}")
+            return []
+
         new_items = []
-        for i, video in enumerate(videos):
-            video_id = video.get("id", "")
-            if video_id in existing_ids:
+        for i, entry in enumerate(new_video_entries):
+            video_id = entry.get("id", "")
+            if not video_id:
                 continue
 
-            # Try to get transcript
+            # Get transcript (free YouTube captions first, Whisper fallback)
             transcript, transcript_source = await self._get_transcript(video_id)
 
             item = ContentItem(
@@ -73,33 +86,31 @@ class YouTubeScraper:
                 type="youtube_video",
                 external_id=video_id,
                 url=f"https://www.youtube.com/watch?v={video_id}",
-                title=video.get("title", ""),
-                caption=video.get("description", ""),
-                transcript=transcript or video.get("description", ""),
+                title=entry.get("title", ""),
+                caption=entry.get("description", "") or "",
+                transcript=transcript or entry.get("description", "") or "",
                 transcript_source=transcript_source,
-                timestamp=_parse_upload_date(video.get("upload_date")),
-                likes=video.get("like_count", 0) or 0,
-                comments=video.get("comment_count", 0) or 0,
-                views=video.get("view_count", 0) or 0,
-                duration=video.get("duration", 0) or 0.0,
-                tags=str(video.get("tags", [])),
+                timestamp=_parse_upload_date(entry.get("upload_date")),
+                likes=entry.get("like_count", 0) or 0,
+                comments=entry.get("comment_count", 0) or 0,
+                views=entry.get("view_count", 0) or 0,
+                duration=entry.get("duration", 0) or 0.0,
+                tags=str(entry.get("tags", [])),
             )
+
+            # Save immediately to DB
+            db.add(item)
+            db.commit()
+            db.refresh(item)
             new_items.append(item)
 
-            if progress_callback and i % 5 == 0:
+            if progress_callback and (i % 3 == 0 or i == total - 1):
                 await progress_callback({
                     "stage": "processing",
-                    "message": f"Processed {i + 1}/{len(videos)} videos",
-                    "progress": (i + 1) / len(videos),
+                    "message": f"Processed {i + 1}/{total} new videos ({item.title[:50]}...)" if item.title and len(item.title) > 50 else f"Processed {i + 1}/{total} new videos",
+                    "progress": (i + 1) / total,
+                    "new_items_found": len(new_items),
                 })
-
-        # Save to DB
-        for item in new_items:
-            db.add(item)
-        db.commit()
-
-        for item in new_items:
-            db.refresh(item)
 
         platform.last_scraped_at = datetime.utcnow()
         db.add(platform)
@@ -107,6 +118,35 @@ class YouTubeScraper:
 
         logger.info(f"Scraped {len(new_items)} new videos from {channel_url}")
         return new_items
+
+    async def _extract_flat_video_list(self, channel_url: str, max_videos: int) -> list[dict]:
+        """Use yt-dlp to get video list with metadata in a single pass.
+
+        Uses extract_flat=False to get full metadata (title, views, likes, etc.)
+        but skip_download=True to avoid downloading any video/audio content.
+        """
+        import yt_dlp
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+        }
+        if max_videos > 0:
+            ydl_opts["playlistend"] = max_videos
+
+        videos_url = f"{channel_url}/videos"
+        entries = await asyncio.to_thread(self._extract_info, videos_url, ydl_opts)
+
+        if not entries or "entries" not in entries:
+            return []
+
+        flat_entries = list(entries["entries"])
+        if max_videos > 0:
+            flat_entries = flat_entries[:max_videos]
+
+        return flat_entries
 
     async def scrape_single_video(
         self,
@@ -163,49 +203,6 @@ class YouTubeScraper:
         db.commit()
         db.refresh(item)
         return item
-
-    async def _extract_channel_videos(self, channel_url: str, max_videos: int) -> list[dict]:
-        """Use yt-dlp to list videos from a channel."""
-        import yt_dlp
-
-        # First get flat list of video IDs
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": True,
-        }
-        if max_videos > 0:
-            ydl_opts["playlistend"] = max_videos
-
-        videos_url = f"{channel_url}/videos"
-        entries = await asyncio.to_thread(self._extract_info, videos_url, ydl_opts)
-
-        if not entries or "entries" not in entries:
-            return []
-
-        flat_entries = list(entries["entries"])
-        if max_videos > 0:
-            flat_entries = flat_entries[:max_videos]
-
-        # Now get full metadata for each video
-        full_videos = []
-        detail_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": False,
-            "skip_download": True,
-        }
-
-        for entry in flat_entries:
-            vid_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id', '')}"
-            try:
-                info = await asyncio.to_thread(self._extract_info, vid_url, detail_opts)
-                if info:
-                    full_videos.append(info)
-            except Exception as e:
-                logger.warning(f"Failed to get details for {vid_url}: {e}")
-
-        return full_videos
 
     def _extract_info(self, url: str, ydl_opts: dict) -> Optional[dict]:
         """Extract info using yt-dlp (sync, meant to be run in thread)."""

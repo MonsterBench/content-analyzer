@@ -405,6 +405,9 @@ export default function CreatorDetailPage({
   const wsRef = useRef<WebSocket | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Scrape options
+  const [scrapeMaxItems, setScrapeMaxItems] = useState(0);
+
   // Add platform form
   const [showAddPlatform, setShowAddPlatform] = useState(false);
   const [newPlatformType, setNewPlatformType] = useState<"instagram" | "youtube">("instagram");
@@ -488,7 +491,7 @@ export default function CreatorDetailPage({
     }, 1000);
 
     try {
-      const job = await triggerScrape(creatorId, { max_items: 0 });
+      const job = await triggerScrape(creatorId, { max_items: scrapeMaxItems });
 
       // Connect WebSocket for live progress
       connectWebSocket(job.id);
@@ -601,13 +604,25 @@ export default function CreatorDetailPage({
             {creator.platforms.length} platform(s)
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           <a
             href={`/chat?creator=${creator.id}`}
             className="px-4 py-2 border border-[var(--border)] rounded-md text-sm hover:bg-[var(--muted)]"
           >
             Chat
           </a>
+          <select
+            value={scrapeMaxItems}
+            onChange={(e) => setScrapeMaxItems(Number(e.target.value))}
+            disabled={scraping}
+            className="px-2 py-2 bg-[var(--background)] border border-[var(--border)] rounded-md text-sm"
+          >
+            <option value={20}>20 videos</option>
+            <option value={50}>50 videos</option>
+            <option value={100}>100 videos</option>
+            <option value={200}>200 videos</option>
+            <option value={0}>All videos</option>
+          </select>
           <button
             onClick={handleScrape}
             disabled={scraping}
